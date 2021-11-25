@@ -1,0 +1,14 @@
+N900 scripts to configure PM features
+
+Copy the scripts/openrc/n900-pm to /etc/init.d/n900-pm and start
+it manually with:
+
+# /etc/init.d/n900-pm start
+
+And if happy you can enable it on boot with:
+
+# openrc add n900-pm default
+
+To check the power management status periodically, you can do:
+
+# /etc/init.d/n900-pm status

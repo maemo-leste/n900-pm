@@ -1,0 +1,213 @@
+#!/sbin/openrc-run
+#
+# Start-up script to configure n900 for power management
+#
+# The LCD needs to be blanked with xset -display :0 dpms force off and
+# unblanked with xset -display :0 dpms force on to idle DSS clocks.
+#
+# Please disable known problem modules for now by adding them into
+# /etc/modprobe.d/blacklist.conf:
+#
+# blacklist ehci-omap
+# blacklist hci_uart
+# blacklist omap_hdq
+#
+# To monitor power consumption, check the power consumption by reading
+# the micro-Watts with cat:
+#
+# /sys/class/power_supply/bq27200-0/power_avg
+#
+# To check no device drivers or busy timers are blocking SoC idle states,
+# check that the RET count keeps increasing when doing:
+#
+# grep ^core_pwrdm /sys/kernel/debug/pm_debug/count
+#
+# This script can also log the power usage status if run with n900 status.
+# You can add it to root crontab to log power consumption once a minute:
+#
+# * * * * * /etc/init.d/n900-pm status >> /var/log/n900-pm 2>&1
+#
+# And the recent power consumption history can be monitored with:
+#
+# tail /var/log/n900-pm
+#  * d=2020-02-19|t=16:40:00|i=OFF:0,RET:27562|p=61|b=none
+#  * d=2020-02-19|t=16:41:00|i=OFF:0,RET:27962|p=60|b=none
+#  * d=2020-02-19|t=16:42:00|i=OFF:0,RET:28302|p=58|b=none
+# ...
+#
+
+name="n900-pm"
+
+
+UART_IDLE_MS=3000
+
+devmem=""
+rwmem=""
+blockers=""
+
+depend() {
+	if grep -i -e alpine /etc/os-release > /dev/null 2>&1; then
+	        need dev
+	        after hwdrivers
+	elif grep -i -e devuan /etc/os-release > /dev/null 2>&1; then
+	        need eudev
+	        after kmod
+	fi
+}
+
+warn_if_module_loaded() {
+	module="${1}"
+	desc="${2}"
+
+	if lsmod | grep "${module}" > /dev/null; then
+	        ewarn "Module ${module} blocks idle: ${desc}"
+	fi
+}
+
+check_module_blacklist() {
+	einfo "Checking for blacklisted modules blocking idle"
+	warn_if_module_loaded ehci-omap "Blocks idle, blacklist?"
+	warn_if_module_loaded omap_hdq "Seems to poll devices, blacklist?"
+	warn_if_module_loaded hci_uart "Blocks uart4 idle oopses on rmmod, blacklist?"
+	#warn_if_module_loaded atmel_mxt_ts "Should be unloaded when screen is blanked"
+}
+
+set_loglevel() {
+	loglevel="${1}"
+
+	einfo "Setting kernel loglevel to ${loglevel}"
+	echo "${loglevel}" > /proc/sysrq-trigger
+}
+
+idle_uarts() {
+	einfo "Idling UARTs"
+
+	# Detach kernel serial console
+	consoles=$(find /sys/bus/platform/devices/4*.serial/ -name console)
+	for console in ${consoles}; do
+	        echo N > ${console}
+	done
+
+	# Enable autosuspend
+	uarts=$(find /sys/bus/platform/devices/4*.serial/power/ -type d)
+	for uart in ${uarts}; do
+	        echo ${UART_IDLE_MS} > ${uart}/autosuspend_delay_ms
+	        echo enabled > ${uart}/wakeup
+	        echo auto > ${uart}/control
+	done
+
+	# Configure wake-up from suspend
+	uarts=$(find /sys/class/tty/tty[SO]*/power/ -type d)
+	for uart in ${uarts}; do
+	        echo enabled > ${uart}/wakeup
+	done
+}
+
+enable_soc_idle_states() {
+	einfo "Enabling deeper SoC idle states"
+	echo 1 > /sys/kernel/debug/pm_debug/enable_off_mode
+}
+
+init_reg_read() {
+	if busybox devmem > /dev/null 2>&1; then
+	        devmem="busybox devmem"
+	        return
+	fi
+
+	rwmem=$(which rwmem)
+}
+
+check_clkctrl() {
+	address="${1}"
+	idleval="${2}"
+	desc="${3}"
+
+	if [ "${devmem}" != "" ]; then
+	        val=$("${devmem}" "${address}")
+	elif [ "${rwmem}" != "" ]; then
+	        val=$("${rwmem}" "${address}" | cut -d' ' -f3)
+	else
+	        return
+	fi
+
+	if [ "${val}" != "${idleval}" ]; then
+	        echo -n "${desc}"
+	fi
+}
+
+update_blockers() {
+	address="${1}"
+	idleval="${2}"
+	desc="${3}"
+
+	device=$(check_clkctrl "${address}" "${idleval}" "${desc}")
+
+	if [ "${blockers}" = "" ] && [ "${device}" != "" ]; then
+	        blockers="${device}"
+	elif [ "${device}" != "" ]; then
+	        blockers="${blockers},${device}"
+	fi
+}
+
+check_status() {
+	blocker_bits=$(cat /sys/kernel/debug/pm_debug/count | grep idlest1 | awk '{print $7}')
+	idle=$(grep ^core_pwrdm /sys/kernel/debug/pm_debug/count | cut -d',' -f2,3)
+	uw=$(cat /sys/class/power_supply/bq27200-0/power_avg)
+	mw=$((${uw} / 1000))
+	if [ -f /sys/class/power_supply/bq27200-0/capacity ]; then
+	        cap=$(cat /sys/class/power_supply/bq27200-0/capacity 2>/dev/null)
+	        if [ "${cap}" = "" ]; then
+		                cap="NA"
+	        fi
+	else
+	        cap=0
+	fi
+	if [ "${reg_read_cmd}" = "" ]; then
+	        init_reg_read
+	fi
+
+	blockers=`python3 - $blocker_bits << EOF
+import sys
+
+# 31 to 0
+cm_idlest1_core_bits = [ 'RESERVED', 'ST_MMC3', 'ST_ICR',
+'RESERVED', 'RESERVED', 'RESERVED', 'ST_MMC2', 'ST_MMC1',
+'RESERVED', 'ST_HDQ', 'ST_MCSPI4', 'ST_MCSPI3', 'ST_MCSPI2',
+'ST_MCSPI1', 'ST_I2C3', 'ST_I2C2', 'ST_I2C1', 'ST_UART2',
+'ST_UART1', 'ST_GPT11', 'ST_GPT10', 'ST_MCBSP5', 'ST_MCBSP1',
+'RESERVED', 'ST_MAILBOXES', 'ST_OMAPCTRL', 'ST_HSOTGUSB_IDLE',
+'ST_HSOTGUSB_STDBY', 'RESERVED', 'ST_SDMA', 'ST_SDRC', 'RESERVED',
+]
+
+cm_idlest1_core_bits = list(reversed(cm_idlest1_core_bits))
+inp = sys.argv[1]
+v = int(inp, 16)
+b= '{0:b}'.format(v)
+blockers = []
+for i in range(0, 32):
+    is_set = (v & (1 << i)) >> i
+    if is_set:
+        blockers.append(cm_idlest1_core_bits[i])
+print(','.join(blockers),end='')
+EOF`
+
+	if [ "${blockers}" = "" ]; then
+	        blockers="none"
+	fi
+
+	date=$(date +%Y-%m-%d)
+	time=$(date +%H:%M:%S)
+
+	echo "d=${date}|t=${time}|i=${idle}|p=${mw}|c=${cap}|b=${blockers}"
+}
+
+start() {
+	check_module_blacklist
+	idle_uarts
+	set_loglevel 0
+	enable_soc_idle_states
+}
+
+status() {
+	check_status
+}

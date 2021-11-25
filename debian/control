@@ -1,0 +1,12 @@
+Source: n900-powermanagement
+Section: n900
+Priority: extra
+Maintainer: Merlijn Wajer <merlijn@wizzup.org>
+Build-Depends:
+ debhelper (>= 10),
+ python3,
+Standards-Version: 4.3.0
+
+Package: n900-powermanagement
+Architecture: all
+Description: Init script for power management for Nokia N900
