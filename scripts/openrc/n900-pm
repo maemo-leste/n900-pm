@@ -154,14 +154,7 @@ check_status() {
 	idle=$(grep ^core_pwrdm /sys/kernel/debug/pm_debug/count | cut -d',' -f2,3)
 	uw=$(cat /sys/class/power_supply/bq27200-0/power_avg)
 	mw=$((${uw} / 1000))
-	if [ -f /sys/class/power_supply/bq27200-0/capacity ]; then
-	        cap=$(cat /sys/class/power_supply/bq27200-0/capacity 2>/dev/null)
-	        if [ "${cap}" = "" ]; then
-		                cap="NA"
-	        fi
-	else
-	        cap=0
-	fi
+	cap=$(cat /sys/class/power_supply/bq27200-0/capacity)
 	if [ "${reg_read_cmd}" = "" ]; then
 	        init_reg_read
 	fi
